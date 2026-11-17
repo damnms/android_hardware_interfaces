@@ -18,6 +18,9 @@
 
 #include <sched.h>
 
+#include <algorithm>
+
+#include <android-base/properties.h>
 #include <android/hardware/graphics/composer/2.1/IComposer.h>
 
 #include <binder/ProcessState.h>
@@ -41,7 +44,12 @@ int main() {
         ALOGE("Couldn't set SCHED_FIFO: %d", errno);
     }
 
-    android::hardware::configureRpcThreadpool(4, true /* will join */);
+    // Some legacy HWC1 implementations (e.g. nvidia tegra) bind a GL context
+    // to the thread that composes and fail when calls arrive on another
+    // binder thread. Such devices can set ro.vendor.hwc.rpc_threads=1.
+    const int rpcThreads =
+            std::max(1, android::base::GetIntProperty("ro.vendor.hwc.rpc_threads", 4));
+    android::hardware::configureRpcThreadpool(rpcThreads, true /* will join */);
 
     android::sp<IComposer> composer = HwcLoader::load();
     if (composer == nullptr) {
