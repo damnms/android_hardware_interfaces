@@ -260,8 +260,14 @@ void Gnss::nmeaCb(GpsUtcTime timestamp, const char* nmea, int length) {
         return;
     }
 
-    android::hardware::hidl_string nmeaString;
-    nmeaString.setToExternal(nmea, length);
+    if (nmea == nullptr || length < 0) {
+        ALOGE("%s: Invalid NMEA sentence", __func__);
+        return;
+    }
+
+    // Copy the sentence: some legacy HALs (Broadcom gps.brcm) pass sentences that
+    // are not null-terminated at length, which setToExternal() aborts on.
+    android::hardware::hidl_string nmeaString(nmea, static_cast<size_t>(length));
     auto ret = sGnssCbIface->gnssNmeaCb(timestamp, nmeaString);
     if (!ret.isOk()) {
         ALOGE("%s: Unable to invoke callback", __func__);
