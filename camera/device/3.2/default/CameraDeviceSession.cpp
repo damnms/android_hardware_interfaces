@@ -19,6 +19,7 @@
 
 #include <set>
 #include <cutils/properties.h>
+#include <sync/sync.h>
 #include <utils/Trace.h>
 #include <hardware/gralloc.h>
 #include <hardware/gralloc1.h>
@@ -42,6 +43,8 @@ static constexpr int32_t CAMERA_RESULT_METADATA_QUEUE_SIZE  = 1 << 20 /* 1MB */;
 // Heuristically picked by size of one page
 static constexpr int METADATA_SHRINK_ABS_THRESHOLD = 4096;
 static constexpr int METADATA_SHRINK_REL_THRESHOLD = 2;
+// Wait for buffer acquire fences in the wrapper (ro.vendor.camera.wait_acquire_fences)
+static constexpr int ACQUIRE_FENCE_TIMEOUT_MS = 1000;
 
 HandleImporter CameraDeviceSession::sHandleImporter;
 buffer_handle_t CameraDeviceSession::sEmptyBuffer = nullptr;
@@ -366,6 +369,23 @@ Status CameraDeviceSession::importRequestImpl(
             ALOGE("%s: input buffer acquire fence is invalid", __FUNCTION__);
             cleanupInflightFences(allFences, numOutputBufs);
             return Status::INTERNAL_ERROR;
+        }
+    }
+
+    // Some legacy HALs never close the acquire fences they get, which leaks
+    // one fd per buffer until cameraserver runs out of descriptors. Let the
+    // wrapper wait for them and hand the HAL no fence (-1) instead.
+    static const bool waitAcquireFences =
+            property_get_bool("ro.vendor.camera.wait_acquire_fences", false);
+    if (waitAcquireFences) {
+        for (size_t i = 0; i < numBufs; i++) {
+            if (allFences[i] < 0) continue;
+            if (sync_wait(allFences[i], ACQUIRE_FENCE_TIMEOUT_MS) != 0) {
+                ALOGW("%s: acquire fence %zu not signaled within %d ms",
+                        __FUNCTION__, i, ACQUIRE_FENCE_TIMEOUT_MS);
+            }
+            sHandleImporter.closeFence(allFences[i]);
+            allFences[i] = -1;
         }
     }
     return Status::OK;
