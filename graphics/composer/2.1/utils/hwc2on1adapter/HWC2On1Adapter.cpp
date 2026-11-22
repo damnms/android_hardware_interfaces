@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <sstream>
 
+#include <cutils/properties.h>
 #include <hardware/hwcomposer.h>
 #include <log/log.h>
 #include <utils/Trace.h>
@@ -1282,9 +1283,11 @@ Error HWC2On1Adapter::Display::set(hwc_display_contents_1& hwcContents) {
 
     // Close acquire fences on FRAMEBUFFER layers, since they will not be used
     // by HWC
+    bool hasClientLayers = false;
     for (size_t l = 0; l < numLayers - 1; ++l) {
         auto& layer = hwcContents.hwLayers[l];
         if (layer.compositionType == HWC_FRAMEBUFFER) {
+            hasClientLayers = true;
             ALOGV("Closing fence %d for layer %zd", layer.acquireFenceFd, l);
             close(layer.acquireFenceFd);
             layer.acquireFenceFd = -1;
@@ -1294,7 +1297,11 @@ Error HWC2On1Adapter::Display::set(hwc_display_contents_1& hwcContents) {
     auto& clientTargetLayer = hwcContents.hwLayers[numLayers - 1];
     if (clientTargetLayer.compositionType == HWC_FRAMEBUFFER_TARGET) {
         clientTargetLayer.handle = mClientTarget.getBuffer();
-        clientTargetLayer.acquireFenceFd = mClientTarget.getFence();
+        // HWC1 ignores the framebuffer target during set() when no layer is
+        // composed by GLES, so it would never close a fence handed over in
+        // that case and the composer process would leak one fd per frame.
+        clientTargetLayer.acquireFenceFd =
+                hasClientLayers ? mClientTarget.getFence() : -1;
     } else {
         ALOGE("[%" PRIu64 "] set: last HWC layer wasn't FRAMEBUFFER_TARGET",
                 mId);
@@ -2512,6 +2519,22 @@ Error HWC2On1Adapter::setAllDisplays() {
     for (size_t hwc1Id = 0; hwc1Id < mHwc1Contents.size(); ++hwc1Id) {
         if (mHwc1Contents[hwc1Id] == nullptr) {
             continue;
+        }
+
+        // Some HWC1 implementations (NVIDIA Tegra K1) read the framebuffer
+        // target fence during set() but never close it. Devices with such a
+        // HAL set ro.vendor.hwc.close_fbt_fence=true so that the adapter
+        // closes it here; a compliant HAL has already closed it.
+        static const bool closeTargetFence =
+                property_get_bool("ro.vendor.hwc.close_fbt_fence", false);
+        if (closeTargetFence) {
+            auto& contents = *mHwc1Contents[hwc1Id];
+            auto& target = contents.hwLayers[contents.numHwLayers - 1];
+            if (target.compositionType == HWC_FRAMEBUFFER_TARGET &&
+                    target.acquireFenceFd >= 0) {
+                close(target.acquireFenceFd);
+                target.acquireFenceFd = -1;
+            }
         }
 
         auto displayId = mHwc1DisplayMap[hwc1Id];
