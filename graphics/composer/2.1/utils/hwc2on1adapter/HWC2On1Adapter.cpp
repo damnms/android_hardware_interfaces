@@ -789,9 +789,9 @@ Error HWC2On1Adapter::Display::present(int32_t* outRetireFence) {
     std::unique_lock<std::recursive_mutex> lock(mStateMutex);
 
     if (mChanges) {
-        Error error = mDevice.setAllDisplays();
+        Error error = mDevice.setDisplay(*this);
         if (error != Error::None) {
-            ALOGE("[%" PRIu64 "] present: setAllDisplaysFailed (%s)", mId,
+            ALOGE("[%" PRIu64 "] present: setDisplay failed (%s)", mId,
                     to_string(error).c_str());
             return error;
         }
@@ -974,7 +974,7 @@ Error HWC2On1Adapter::Display::validate(uint32_t* outNumTypes,
     std::unique_lock<std::recursive_mutex> lock(mStateMutex);
 
     if (!mChanges) {
-        if (!mDevice.prepareAllDisplays()) {
+        if (!mDevice.prepareDisplay(*this)) {
             return Error::BadDisplay;
         }
     } else {
@@ -2318,93 +2318,49 @@ void HWC2On1Adapter::populatePrimary() {
     mDisplays.emplace(display->getId(), std::move(display));
 }
 
-bool HWC2On1Adapter::prepareAllDisplays() {
+// SurfaceFlinger (since Android 10) validates and presents one display after
+// the other, so HWC1 prepare() and set() are called for one display at a time.
+// The entries of the other displays are null, which HWC1 treats as "do not
+// touch this display".
+void HWC2On1Adapter::buildHwc1Contents(Display& display) {
+    // HWC1 always expects at least the primary and the external entry, plus
+    // the virtual entry from HWC 1.3 on
+    mHwc1Contents.assign(mHwc1MinorVersion >= 3 ? 3 : 2, nullptr);
+    auto hwc1Id = display.getHwc1Id();
+    if (hwc1Id >= 0 && static_cast<size_t>(hwc1Id) < mHwc1Contents.size()) {
+        mHwc1Contents[hwc1Id] = display.getDisplayContents();
+    }
+}
+
+bool HWC2On1Adapter::prepareDisplay(Display& display) {
     ATRACE_CALL();
 
     std::unique_lock<std::recursive_timed_mutex> lock(mStateMutex);
 
-    for (const auto& displayPair : mDisplays) {
-        auto& display = displayPair.second;
-        if (!display->prepare()) {
-            return false;
-        }
-    }
-
     if (mHwc1DisplayMap.count(HWC_DISPLAY_PRIMARY) == 0) {
-        ALOGE("prepareAllDisplays: Unable to find primary HWC1 display");
+        ALOGE("prepareDisplay: Unable to find primary HWC1 display");
         return false;
     }
 
-    // Build an array of hwc_display_contents_1 to call prepare() on HWC1.
-    mHwc1Contents.clear();
-
-    // Always push the primary display
-    auto primaryDisplayId = mHwc1DisplayMap[HWC_DISPLAY_PRIMARY];
-    auto& primaryDisplay = mDisplays[primaryDisplayId];
-    mHwc1Contents.push_back(primaryDisplay->getDisplayContents());
-
-    // Push the external display, if present
-    if (mHwc1DisplayMap.count(HWC_DISPLAY_EXTERNAL) != 0) {
-        auto externalDisplayId = mHwc1DisplayMap[HWC_DISPLAY_EXTERNAL];
-        auto& externalDisplay = mDisplays[externalDisplayId];
-        mHwc1Contents.push_back(externalDisplay->getDisplayContents());
-    } else {
-        // Even if an external display isn't present, we still need to send
-        // at least two displays down to HWC1
-        mHwc1Contents.push_back(nullptr);
+    if (!display.prepare()) {
+        return false;
     }
 
-    // Push the hardware virtual display, if supported and present
-    if (mHwc1MinorVersion >= 3) {
-        if (mHwc1DisplayMap.count(HWC_DISPLAY_VIRTUAL) != 0) {
-            auto virtualDisplayId = mHwc1DisplayMap[HWC_DISPLAY_VIRTUAL];
-            auto& virtualDisplay = mDisplays[virtualDisplayId];
-            mHwc1Contents.push_back(virtualDisplay->getDisplayContents());
-        } else {
-            mHwc1Contents.push_back(nullptr);
-        }
+    buildHwc1Contents(display);
+    auto hwc1Id = display.getHwc1Id();
+    if (hwc1Id < 0 || static_cast<size_t>(hwc1Id) >= mHwc1Contents.size()) {
+        ALOGE("prepareDisplay: invalid HWC1 display %d", hwc1Id);
+        return false;
     }
 
-    for (auto& displayContents : mHwc1Contents) {
-        if (!displayContents) {
-            continue;
-        }
-
-        ALOGV("Display %zd layers:", mHwc1Contents.size() - 1);
-        for (size_t l = 0; l < displayContents->numHwLayers; ++l) {
-            auto& layer = displayContents->hwLayers[l];
-            ALOGV("  %zd: %d", l, layer.compositionType);
-        }
-    }
-
-    ALOGV("Calling HWC1 prepare");
+    ALOGV("Calling HWC1 prepare for display %d", hwc1Id);
     {
         ATRACE_NAME("HWC1 prepare");
         mHwc1Device->prepare(mHwc1Device, mHwc1Contents.size(),
                 mHwc1Contents.data());
     }
 
-    for (size_t c = 0; c < mHwc1Contents.size(); ++c) {
-        auto& contents = mHwc1Contents[c];
-        if (!contents) {
-            continue;
-        }
-        ALOGV("Display %zd layers:", c);
-        for (size_t l = 0; l < contents->numHwLayers; ++l) {
-            ALOGV("  %zd: %d", l, contents->hwLayers[l].compositionType);
-        }
-    }
-
-    // Return the received contents to their respective displays
-    for (size_t hwc1Id = 0; hwc1Id < mHwc1Contents.size(); ++hwc1Id) {
-        if (mHwc1Contents[hwc1Id] == nullptr) {
-            continue;
-        }
-
-        auto displayId = mHwc1DisplayMap[hwc1Id];
-        auto& display = mDisplays[displayId];
-        display->generateChanges();
-    }
+    display.generateChanges();
 
     return true;
 }
@@ -2486,65 +2442,55 @@ void dumpHWC1Message(hwc_composer_device_1* device, size_t numDisplays,
     ALOGV("-----------------------------");
 }
 
-Error HWC2On1Adapter::setAllDisplays() {
+Error HWC2On1Adapter::setDisplay(Display& display) {
     ATRACE_CALL();
 
     std::unique_lock<std::recursive_timed_mutex> lock(mStateMutex);
 
-    // Make sure we're ready to validate
-    for (size_t hwc1Id = 0; hwc1Id < mHwc1Contents.size(); ++hwc1Id) {
-        if (mHwc1Contents[hwc1Id] == nullptr) {
-            continue;
-        }
+    buildHwc1Contents(display);
+    auto hwc1Id = display.getHwc1Id();
+    if (hwc1Id < 0 || static_cast<size_t>(hwc1Id) >= mHwc1Contents.size() ||
+            mHwc1Contents[hwc1Id] == nullptr) {
+        ALOGE("setDisplay: invalid HWC1 display %d", hwc1Id);
+        return Error::BadDisplay;
+    }
+    auto& contents = *mHwc1Contents[hwc1Id];
 
-        auto displayId = mHwc1DisplayMap[hwc1Id];
-        auto& display = mDisplays[displayId];
-        Error error = display->set(*mHwc1Contents[hwc1Id]);
-        if (error != Error::None) {
-            ALOGE("setAllDisplays: Failed to set display %zd: %s", hwc1Id,
-                    to_string(error).c_str());
-            return error;
-        }
+    // Make sure we're ready to set
+    Error error = display.set(contents);
+    if (error != Error::None) {
+        ALOGE("setDisplay: Failed to set display %d: %s", hwc1Id,
+                to_string(error).c_str());
+        return error;
     }
 
-    ALOGV("Calling HWC1 set");
+    ALOGV("Calling HWC1 set for display %d", hwc1Id);
     {
         ATRACE_NAME("HWC1 set");
-        //dumpHWC1Message(mHwc1Device, mHwc1Contents.size(), mHwc1Contents.data());
         mHwc1Device->set(mHwc1Device, mHwc1Contents.size(),
                 mHwc1Contents.data());
     }
 
-    // Add retire and release fences
-    for (size_t hwc1Id = 0; hwc1Id < mHwc1Contents.size(); ++hwc1Id) {
-        if (mHwc1Contents[hwc1Id] == nullptr) {
-            continue;
+    // Some HWC1 implementations (NVIDIA Tegra K1) read the framebuffer
+    // target fence during set() but never close it. Devices with such a
+    // HAL set ro.vendor.hwc.close_fbt_fence=true so that the adapter
+    // closes it here; a compliant HAL has already closed it.
+    static const bool closeTargetFence =
+            property_get_bool("ro.vendor.hwc.close_fbt_fence", false);
+    if (closeTargetFence) {
+        auto& target = contents.hwLayers[contents.numHwLayers - 1];
+        if (target.compositionType == HWC_FRAMEBUFFER_TARGET &&
+                target.acquireFenceFd >= 0) {
+            close(target.acquireFenceFd);
+            target.acquireFenceFd = -1;
         }
-
-        // Some HWC1 implementations (NVIDIA Tegra K1) read the framebuffer
-        // target fence during set() but never close it. Devices with such a
-        // HAL set ro.vendor.hwc.close_fbt_fence=true so that the adapter
-        // closes it here; a compliant HAL has already closed it.
-        static const bool closeTargetFence =
-                property_get_bool("ro.vendor.hwc.close_fbt_fence", false);
-        if (closeTargetFence) {
-            auto& contents = *mHwc1Contents[hwc1Id];
-            auto& target = contents.hwLayers[contents.numHwLayers - 1];
-            if (target.compositionType == HWC_FRAMEBUFFER_TARGET &&
-                    target.acquireFenceFd >= 0) {
-                close(target.acquireFenceFd);
-                target.acquireFenceFd = -1;
-            }
-        }
-
-        auto displayId = mHwc1DisplayMap[hwc1Id];
-        auto& display = mDisplays[displayId];
-        auto retireFenceFd = mHwc1Contents[hwc1Id]->retireFenceFd;
-        ALOGV("setAllDisplays: Adding retire fence %d to display %zd",
-                retireFenceFd, hwc1Id);
-        display->addRetireFence(mHwc1Contents[hwc1Id]->retireFenceFd);
-        display->addReleaseFences(*mHwc1Contents[hwc1Id]);
     }
+
+    // Add retire and release fences
+    ALOGV("setDisplay: Adding retire fence %d to display %d",
+            contents.retireFenceFd, hwc1Id);
+    display.addRetireFence(contents.retireFenceFd);
+    display.addReleaseFences(contents);
 
     return Error::None;
 }

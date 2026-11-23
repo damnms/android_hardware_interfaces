@@ -403,8 +403,8 @@ private:
             // call, all public calls into Display must acquire this mutex.
             //
             // It is recursive because we don't want to deadlock in validate
-            // (or present) when we call HWC2On1Adapter::prepareAllDisplays
-            // (or setAllDisplays), which calls back into Display functions
+            // (or present) when we call HWC2On1Adapter::prepareDisplay
+            // (or setDisplay), which calls back into Display functions
             // which require locking.
             mutable std::recursive_mutex mStateMutex;
 
@@ -675,9 +675,10 @@ private:
             hwc2_layer_t layerId);
     void populatePrimary();
 
-    bool prepareAllDisplays();
+    void buildHwc1Contents(Display& display);
+    bool prepareDisplay(Display& display);
     std::vector<struct hwc_display_contents_1*> mHwc1Contents;
-    HWC2::Error setAllDisplays();
+    HWC2::Error setDisplay(Display& display);
 
     // Callbacks
     void hwc1Invalidate();
