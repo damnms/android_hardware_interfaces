@@ -116,6 +116,19 @@ HWC2On1Adapter::HWC2On1Adapter(hwc_composer_device_1_t* hwc1Device)
     populatePrimary();
     mHwc1Device->registerProcs(mHwc1Device,
             static_cast<const hwc_procs_t*>(mHwc1Callbacks.get()));
+
+    // HWC1 implementations may report only hotplug changes, so an external
+    // display that is already connected when the adapter starts (boot or
+    // composer restart with HDMI plugged in) would never show up. HWC1
+    // returns configs only for a connected display.
+    uint32_t config = 0;
+    size_t numConfigs = 1;
+    if (mHwc1MinorVersion >= 1 &&
+            mHwc1Device->getDisplayConfigs(mHwc1Device, HWC_DISPLAY_EXTERNAL,
+                    &config, &numConfigs) == 0 && numConfigs > 0) {
+        ALOGI("External display already connected");
+        hwc1Hotplug(HWC_DISPLAY_EXTERNAL, 1);
+    }
 }
 
 HWC2On1Adapter::~HWC2On1Adapter() {
