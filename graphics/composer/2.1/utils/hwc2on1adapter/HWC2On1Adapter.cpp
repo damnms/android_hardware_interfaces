@@ -2366,6 +2366,26 @@ bool HWC2On1Adapter::prepareDisplay(Display& display) {
         return false;
     }
 
+    // Some HWC1 implementations (NVIDIA Tegra K1) glitch on a rotated panel
+    // while the same buffers are also shown as overlays on an external
+    // display. Devices with such a HAL set
+    // ro.vendor.hwc.client_primary_with_external=true so that the primary
+    // display is composed by the client while an external display is
+    // connected.
+    static const bool clientPrimaryWithExternal = property_get_bool(
+            "ro.vendor.hwc.client_primary_with_external", false);
+    if (clientPrimaryWithExternal && hwc1Id == HWC_DISPLAY_PRIMARY &&
+            mHwc1DisplayMap.count(HWC_DISPLAY_EXTERNAL) != 0) {
+        auto& contents = *mHwc1Contents[hwc1Id];
+        for (size_t i = 0; i < contents.numHwLayers; ++i) {
+            auto& hwc1Layer = contents.hwLayers[i];
+            if (hwc1Layer.compositionType != HWC_FRAMEBUFFER_TARGET) {
+                hwc1Layer.compositionType = HWC_FRAMEBUFFER;
+                hwc1Layer.flags |= HWC_SKIP_LAYER;
+            }
+        }
+    }
+
     ALOGV("Calling HWC1 prepare for display %d", hwc1Id);
     {
         ATRACE_NAME("HWC1 prepare");
