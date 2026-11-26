@@ -75,13 +75,12 @@ static bool registerExternalServiceImplementation(const std::string& libName,
 int main(int /* argc */, char* /* argv */ []) {
     signal(SIGPIPE, SIG_IGN);
 
-    ::android::ProcessState::initWithDriver("/dev/vndbinder");
-    // Both calls below act on the same ProcessState, and libbinder aborts
-    // when the pool is shrunk after it has started: set the size first.
+    // This device builds without VNDK, so the HIDL code and libbinder_ndk
+    // share one libbinder and one ProcessState. Opening /dev/vndbinder here
+    // would put the AIDL services (Bluetooth audio) on vndservicemanager,
+    // where the Bluetooth stack never finds them. Nothing in this HAL uses
+    // vndbinder, so stay on the default /dev/binder.
     ABinderProcess_setThreadPoolMaxThreadCount(1);
-    // start a threadpool for vndbinder interactions
-    ::android::ProcessState::self()->startThreadPool();
-
     ABinderProcess_startThreadPool();
 
     const int32_t defaultValue = -1;
