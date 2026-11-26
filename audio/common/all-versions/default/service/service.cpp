@@ -76,10 +76,12 @@ int main(int /* argc */, char* /* argv */ []) {
     signal(SIGPIPE, SIG_IGN);
 
     ::android::ProcessState::initWithDriver("/dev/vndbinder");
+    // Both calls below act on the same ProcessState, and libbinder aborts
+    // when the pool is shrunk after it has started: set the size first.
+    ABinderProcess_setThreadPoolMaxThreadCount(1);
     // start a threadpool for vndbinder interactions
     ::android::ProcessState::self()->startThreadPool();
 
-    ABinderProcess_setThreadPoolMaxThreadCount(1);
     ABinderProcess_startThreadPool();
 
     const int32_t defaultValue = -1;
